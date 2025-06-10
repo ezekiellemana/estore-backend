@@ -526,7 +526,7 @@ app.post('/api/users/forgot-password', async (req, res) => {
     const resetToken = user.createPasswordResetToken();
     await user.save({ validateBeforeSave: false });
 
-    const resetURL = ${process.env.FRONTEND_URL}/reset-password/${resetToken};
+    const resetURL = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
     const mailOptions = {
       from: "eStore Support" <${process.env.ADMIN_EMAIL}>,
       to: user.email,
