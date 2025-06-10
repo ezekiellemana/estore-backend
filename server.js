@@ -43,13 +43,13 @@ app.use(
     store: MongoStore.create({
       mongoUrl: process.env.MONGO_URI,
       collectionName: 'sessions',
-      ttl: 60 * 60 * 24 * 7, // 1 week
+      ttl: 60 * 60 * 24 * 7, // 1 day
     }),
     cookie: {
       secure: process.env.NODE_ENV === 'production', // true if HTTPS
       httpOnly: true,
-      sameSite: 'lax',
-      maxAge: 1000 * 60 * 60 * 24 * 7, // 1 week
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      maxAge: 1000 * 60 * 60 * 24 , // 1 week
     },
   })
 );
