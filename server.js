@@ -358,21 +358,6 @@ app.use('/api/users/forgot-password', authLimiter);
 // ROUTES: USERS (REGISTER, LOGIN, LOGOUT, PROFILE, FORGOT/RESET PASSWORD, ADMIN)
 // ────────────────────────────────────────────────────────────────────────────────
 
-// AUTH MIDDLEWARE — session based
-const authMiddleware = async (req, res, next) => {
-  if (!req.session || !req.session.userId) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-  req.user = await User.findById(req.session.userId);
-  if (!req.user) return res.status(401).json({ error: 'User not found' });
-  next();
-};
-
-const adminMiddleware = (req, res, next) => {
-  if (!req.user?.isAdmin) return res.status(403).json({ error: 'Admin access required' });
-  next();
-};
-
 // REGISTER
 app.post(
   '/api/users/register',
