@@ -1827,7 +1827,6 @@ app.post('/api/users/wishlist/:productId', authMiddleware, async (req, res) => {
 // ────────────────────────────────────────────────────────────────────────────────
 // CRON JOBS: DAILY SALES REPORT EMAIL
 // ────────────────────────────────────────────────────────────────────────────────
-
 cron.schedule('0 8 * * *', async () => {
   try {
     const totalSalesData = await Order.aggregate([
@@ -1865,22 +1864,22 @@ cron.schedule('0 8 * * *', async () => {
       { $limit: 5 },
     ]);
 
-    const htmlReport = 
+    const htmlReport = `
       <h2>📊 Daily Sales Report</h2>
-      <p><strong>Total Sales:</strong> TZS ${totalSalesData[0]?.total.toLocaleString() || 0}</p>
+      <p><strong>Total Sales:</strong> TZS ${totalSalesData[0]?.total?.toLocaleString?.() || 0}</p>
       <h3>🔥 Top Selling Products:</h3>
       <ul>
         ${topProducts
           .map(
             (p) =>
-              <li>${p.name}: ${p.totalQuantity} sold, TZS ${p.totalRevenue.toLocaleString()}</li>
+              `<li>${p.name}: ${p.totalQuantity} sold, TZS ${p.totalRevenue?.toLocaleString?.()}</li>`
           )
           .join('')}
       </ul>
-    ;
+    `;
 
     await transporter.sendMail({
-      from: "eStore Reports" <${process.env.EMAIL_USER}>,
+      from: `"eStore Reports" <${process.env.EMAIL_USER}>`,
       to: process.env.ADMIN_EMAIL,
       subject: '📈 Daily Sales Analytics',
       html: htmlReport,
