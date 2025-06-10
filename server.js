@@ -1508,12 +1508,13 @@ app.post('/api/admin/broadcast', authMiddleware, adminMiddleware, async (req, re
     const users = await User.find({}, 'email');
     const emails = users.map((u) => u.email);
 
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: emails,
-      subject,
-      html: <p>${message}</p>,
-    });
+  await transporter.sendMail({
+    from: `"eStore Reports" <${process.env.EMAIL_USER}>`,
+    to: process.env.ADMIN_EMAIL,
+    subject: 'Subject',
+    html: `<p>${message}</p>`, // <-- This is a string!
+  });
+
 
     res.json({ message: 'Email broadcast sent.' });
   } catch (err) {
