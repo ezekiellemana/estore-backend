@@ -1,38 +1,55 @@
 // server.js
 
-// ────────────────────────────────────────────────────────────────────────────────
-// IMPORTS & CONFIGURATION
-// ────────────────────────────────────────────────────────────────────────────────
-
+// ────────────────────────────────
+// IMPORTS & SETUP
+// ────────────────────────────────
 const express = require('express');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const cors = require('cors');
-const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
-const { body, query, validationResult } = require('express-validator');
-const rateLimit = require('express-rate-limit');
+const session = require('express-session');
+const MongoStore = require('connect-mongo');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const GitHubStrategy = require('passport-github2').Strategy;
-const session = require('express-session');
 const cookieParser = require('cookie-parser');
+const rateLimit = require('express-rate-limit');
+const { body, query, validationResult } = require('express-validator');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
-const { randomUUID } = require('crypto');
-const { Parser } = require('json2csv');
 const multer = require('multer');
+const { Parser } = require('json2csv');
+const { randomUUID } = require('crypto');
 
 dotenv.config();
 
 const app = express();
+app.set('trust proxy', 1); // for deployment
 
-// 👉 Fix for proxy headers (like X-Forwarded-For)
-app.set('trust proxy', 1);
-// ────────────────────────────────────────────────────────────────────────────────
-// PASSPORT & SESSION SETUP
-// ────────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────
+// CORS (Dev + Prod Support!)
+// ────────────────────────────────
+const allowedOrigins = [
+  'http://localhost:5173',
+  process.env.FRONTEND_URL
+];
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+};
+app.use(cors(corsOptions));
+
+// ────────────────────────────────
+// SESSION, COOKIES, BODY PARSE
+// ────────────────────────────────
+app.use(express.json());
+app.use(cookieParser());
 
 app.use(
   session({
@@ -42,99 +59,91 @@ app.use(
     store: MongoStore.create({
       mongoUrl: process.env.MONGO_URI,
       collectionName: 'sessions',
-      ttl: 60 * 60 * 24 * 7, // 1 week
+      ttl: 60 * 60 * 24 * 7,
     }),
     cookie: {
       secure: process.env.NODE_ENV === 'production',
       httpOnly: true,
       sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      maxAge: 1000 * 60 * 60 * 24 * 7, // 1 week
+      maxAge: 1000 * 60 * 60 * 24 * 7,
     },
   })
 );
+
+// ────────────────────────────────
+// PASSPORT INIT
+// ────────────────────────────────
 app.use(passport.initialize());
 app.use(passport.session());
-app.use(cookieParser());
 
-// ────────────────────────────────────────────────────────────────────────────────
-// MONGOOSE MODELS (SCHEMAS)
-// ────────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────
+// GUEST ID COOKIE + SANITIZE
+// ────────────────────────────────
+app.use((req, res, next) => {
+  if (req.headers.authorization?.startsWith('Bearer ')) return next();
+  if (req.cookies?.guestId) return next();
+  res.cookie('guestId', randomUUID(), { httpOnly: true, sameSite: 'lax' });
+  next();
+});
+const sanitizeInput = (req, res, next) => {
+  const cleanObject = (obj) => {
+    for (const key in obj) {
+      if (typeof obj[key] === 'string') obj[key] = obj[key].replace(/[$][\w]+/g, '');
+      else if (typeof obj[key] === 'object' && obj[key] !== null) cleanObject(obj[key]);
+    }
+    return obj;
+  };
+  if (req.body) req.body = cleanObject(req.body);
+  if (req.query) req.query = cleanObject(req.query);
+  if (req.params) req.params = cleanObject(req.params);
+  next();
+};
+app.use(sanitizeInput);
 
-// ── USER SCHEMA ──────────────────────────────────────────────────────────────────
+// ────────────────────────────────
+// DB SCHEMAS
+// ────────────────────────────────
+
+// USER
 const userSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: [true, 'Name is required'],
-    trim: true,
-  },
-  email: {
-    type: String,
-    required: [true, 'Email is required'],
-    unique: true,
-    lowercase: true,
-    trim: true,
-  },
-  password: {
-    type: String,
-    required: [true, 'Password is required'],
-    select: false,
-  },
-  isAdmin: {
-    type: Boolean,
-    default: false,
-  },
+  name: { type: String, required: [true, 'Name is required'], trim: true },
+  email: { type: String, required: [true, 'Email is required'], unique: true, lowercase: true, trim: true },
+  password: { type: String, required: [true, 'Password is required'], select: false },
+  isAdmin: { type: Boolean, default: false },
   address: {
     street: { type: String, default: '' },
     city: { type: String, default: '' },
     country: { type: String, default: '' },
     postalCode: { type: String, default: '' },
   },
-  wishlist: [
-    {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Product',
-    },
-  ],
-  // ── NEW FIELDS FOR PASSWORD RESET ───────────────────────────────────────────
+  wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product' }],
   passwordResetToken: String,
   passwordResetExpires: Date,
-  // ───────────────────────────────────────────────────────────────────────────
   oauthProvider: String,
   oauthId: String,
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
+  createdAt: { type: Date, default: Date.now },
 });
-
-// ── HASH PASSWORD BEFORE SAVING ────────────────────────────────────────────────
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
   this.password = await bcrypt.hash(this.password, 12);
   next();
 });
-
-// ── GENERATE + STORE A RESET TOKEN ────────────────────────────────────────────
 userSchema.methods.createPasswordResetToken = function () {
   const resetToken = crypto.randomBytes(32).toString('hex');
-  this.passwordResetToken = crypto
-    .createHash('sha256')
-    .update(resetToken)
-    .digest('hex');
-  this.passwordResetExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
+  this.passwordResetToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+  this.passwordResetExpires = Date.now() + 10 * 60 * 1000;
   return resetToken;
 };
-
 const User = mongoose.model('User', userSchema);
 
-// ── CATEGORY SCHEMA ───────────────────────────────────────────────────────────
+// CATEGORY
 const categorySchema = new mongoose.Schema({
   name: { type: String, required: true, unique: true },
   description: { type: String },
 });
 const Category = mongoose.model('Category', categorySchema);
 
-// ── PRODUCT SCHEMA ────────────────────────────────────────────────────────────
+// PRODUCT
 const productSchema = new mongoose.Schema({
   name: { type: String, required: true },
   description: { type: String },
@@ -153,18 +162,15 @@ const productSchema = new mongoose.Schema({
   reviewCount: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
 });
-
-// Stock alert middleware
 productSchema.pre('save', async function (next) {
   if (this.isModified('stock') && this.stock <= 5) {
     console.log(`Low stock alert: Product "${this.name}" has ${this.stock} units remaining.`);
   }
   next();
 });
-
 const Product = mongoose.model('Product', productSchema);
 
-// ── REVIEW SCHEMA ──────────────────────────────────────────────────────────────
+// REVIEW
 const reviewSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
@@ -176,15 +182,12 @@ const reviewSchema = new mongoose.Schema({
     funny: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     angry: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   },
-  adminReply: {
-    message: { type: String },
-    date: { type: Date },
-  },
+  adminReply: { message: { type: String }, date: { type: Date } },
   createdAt: { type: Date, default: Date.now },
 });
 const Review = mongoose.model('Review', reviewSchema);
 
-// ── REACTION SCHEMA ───────────────────────────────────────────────────────────
+// REACTION
 const reactionSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   review: { type: mongoose.Schema.Types.ObjectId, ref: 'Review', required: true },
@@ -194,7 +197,7 @@ const reactionSchema = new mongoose.Schema({
 reactionSchema.index({ user: 1, review: 1, type: 1 }, { unique: true });
 const Reaction = mongoose.model('Reaction', reactionSchema);
 
-// ── CART SCHEMA ───────────────────────────────────────────────────────────────
+// CART
 const cartSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', unique: true, sparse: true },
   guestId: { type: String, unique: true, sparse: true },
@@ -208,7 +211,7 @@ const cartSchema = new mongoose.Schema({
 });
 const Cart = mongoose.model('Cart', cartSchema);
 
-// ── ORDER SCHEMA ──────────────────────────────────────────────────────────────
+// ORDER
 const orderSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   items: [
@@ -224,10 +227,9 @@ const orderSchema = new mongoose.Schema({
 });
 const Order = mongoose.model('Order', orderSchema);
 
-// ────────────────────────────────────────────────────────────────────────────────
-// PASSPORT STRATEGIES (Google & GitHub OAuth)
-// ────────────────────────────────────────────────────────────────────────────────
-
+// ────────────────────────────────
+// PASSPORT STRATEGIES
+// ────────────────────────────────
 passport.serializeUser((user, done) => done(null, user._id));
 passport.deserializeUser(async (id, done) => {
   try {
@@ -237,8 +239,6 @@ passport.deserializeUser(async (id, done) => {
     done(err);
   }
 });
-
-// Google OAuth
 passport.use(
   new GoogleStrategy(
     {
@@ -265,8 +265,6 @@ passport.use(
     }
   )
 );
-
-// GitHub OAuth
 passport.use(
   new GitHubStrategy(
     {
@@ -294,87 +292,9 @@ passport.use(
   )
 );
 
-// ────────────────────────────────────────────────────────────────────────────────
-// MIDDLEWARES
-// ────────────────────────────────────────────────────────────────────────────────
-
-// 1) Assign a guestId cookie if no JWT is present
-app.use((req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    return next();
-  }
-  if (req.cookies?.guestId) {
-    return next();
-  }
-  const newGuestId = randomUUID();
-  res.cookie('guestId', newGuestId, { httpOnly: true, sameSite: 'lax' });
-  next();
-});
-
-// 2) Sanitization to prevent MongoDB injection
-const sanitizeInput = (req, res, next) => {
-  const cleanObject = (obj) => {
-    for (const key in obj) {
-      if (typeof obj[key] === 'string') {
-        obj[key] = obj[key].replace(/[$][\w]+/g, '');
-      } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-        cleanObject(obj[key]);
-      }
-    }
-    return obj;
-  };
-  if (req.body) req.body = cleanObject(req.body);
-  if (req.query) req.query = cleanObject(req.query);
-  if (req.params) req.params = cleanObject(req.params);
-  next();
-};
-
-const allowedOrigins = [
-  'http://localhost:5173',
-  process.env.FRONTEND_URL
-];
-
-const corsOptions = {
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-};
-
-app.use(cors(corsOptions));
-app.use(express.json());
-app.use(sanitizeInput);
-
-// 3) Rate limiting for auth‐related endpoints
-const authLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 50,
-  message: 'Too many requests, please try again later.',
-});
-app.use('/api/users/login', authLimiter);
-app.use('/api/users/forgot-password', authLimiter);
-
-// 4) Helper to retrieve cart query (user vs. guestId)
-const getCartQuery = (req) => {
-  if (req.user && req.user._id) {
-    return { user: req.user._id };
-  }
-  return { guestId: req.cookies.guestId };
-};
-
-// 5) Error handler
-const errorHandler = (err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: 'Something went wrong!' });
-};
-
-// ────────────────────────────────────────────────────────────────────────────────
-// NODEMAILER TRANSPORTER (SINGLE INSTANCE)
-// ────────────────────────────────────────────────────────────────────────────────
-
+// ────────────────────────────────
+// NODEMAILER TRANSPORTER
+// ────────────────────────────────
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
   port: Number(process.env.EMAIL_PORT),
@@ -385,42 +305,54 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// ────────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────
 // PASSPORT CALLBACK ROUTES
-// ────────────────────────────────────────────────────────────────────────────────
-
+// ────────────────────────────────
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 app.get(
   '/auth/google/callback',
   passport.authenticate('google', { failureRedirect: '/login' }),
   (req, res) => {
-    const token = jwt.sign({ userId: req.user._id }, process.env.JWT_SECRET, {
-      expiresIn: '1h',
-    });
-    res.redirect(`${process.env.FRONTEND_URL}/oauth?token=${token}`);
+    res.redirect(`${process.env.FRONTEND_URL}/oauth-success`);
   }
 );
 
-app.get('/auth/github', passport.authenticate('github', { scope: ['user:email'] }));
-app.get(
-  '/auth/github/callback',
-  passport.authenticate('github', { failureRedirect: '/login' }),
-  (req, res) => {
-    const token = jwt.sign({ userId: req.user._id }, process.env.JWT_SECRET, {
-      expiresIn: '1h',
-    });
-    res.redirect(`${process.env.FRONTEND_URL}/oauth?token=${token}`);
-  }
-);
-
-// ────────────────────────────────────────────────────────────────────────────────
-// MONGODB CONNECTION
-// ────────────────────────────────────────────────────────────────────────────────
-
+// ────────────────────────────────
+// DB CONNECT
+// ────────────────────────────────
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log('MongoDB connected'))
   .catch((err) => console.error('MongoDB connection error:', err));
+
+// ────────────────────────────────
+// HELPER FUNCTIONS & MIDDLEWARES
+// ────────────────────────────────
+const authMiddleware = async (req, res, next) => {
+  if (!req.session || !req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+  req.user = await User.findById(req.session.userId);
+  if (!req.user) return res.status(401).json({ error: 'User not found' });
+  next();
+};
+const adminMiddleware = (req, res, next) => {
+  if (!req.user?.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+  next();
+};
+// Optional auth for reviews etc
+const optionalAuth = async (req, res, next) => {
+  if (req.session && req.session.userId) {
+    req.user = await User.findById(req.session.userId);
+  }
+  next();
+};
+const getCartQuery = (req) => req.user && req.user._id ? { user: req.user._id } : { guestId: req.cookies.guestId };
+
+// ────────────────────────────────
+// RATE LIMITERS
+// ────────────────────────────────
+const authLimiter = rateLimit({ windowMs: 60 * 1000, max: 50, message: 'Too many requests, slow down.' });
+app.use('/api/users/login', authLimiter);
+app.use('/api/users/forgot-password', authLimiter);
 
 // ────────────────────────────────────────────────────────────────────────────────
 // ROUTES: USERS (REGISTER, LOGIN, LOGOUT, PROFILE, FORGOT/RESET PASSWORD, ADMIN)
@@ -609,12 +541,12 @@ app.post('/api/users/forgot-password', async (req, res) => {
     const resetToken = user.createPasswordResetToken();
     await user.save({ validateBeforeSave: false });
 
-    const resetURL = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+    const resetURL = ${process.env.FRONTEND_URL}/reset-password/${resetToken};
     const mailOptions = {
-      from: `"eStore Support" <${process.env.ADMIN_EMAIL}>`,
+      from: "eStore Support" <${process.env.ADMIN_EMAIL}>,
       to: user.email,
       subject: '🔒 Your eStore Password Reset Link (expires in 10 minutes)',
-      text: `Hi ${user.name},
+      text: Hi ${user.name},
 
 You requested a password reset. Click the link below to set a new password. This link will expire in 10 minutes:
 
@@ -624,14 +556,14 @@ If you did not request this, please ignore this email.
 
 Thanks,
 eStore Team
-`,
-      html: `
+,
+      html: 
         <p>Hi ${user.name},</p>
         <p>You requested a password reset. Click the link below to set a new password (valid for 10 minutes):</p>
         <p><a href="${resetURL}">${resetURL}</a></p>
         <p>If you did not request this, please ignore this email.</p>
         <p>Thanks,<br>eStore Team</p>
-      `,
+      ,
     };
 
     await transporter.sendMail(mailOptions);
@@ -1598,7 +1530,7 @@ app.post('/api/admin/broadcast', authMiddleware, adminMiddleware, async (req, re
       from: process.env.EMAIL_USER,
       to: emails,
       subject,
-      html: `<p>${message}</p>`,
+      html: <p>${message}</p>,
     });
 
     res.json({ message: 'Email broadcast sent.' });
@@ -1951,7 +1883,7 @@ cron.schedule('0 8 * * *', async () => {
       { $limit: 5 },
     ]);
 
-    const htmlReport = `
+    const htmlReport = 
       <h2>📊 Daily Sales Report</h2>
       <p><strong>Total Sales:</strong> TZS ${totalSalesData[0]?.total.toLocaleString() || 0}</p>
       <h3>🔥 Top Selling Products:</h3>
@@ -1959,14 +1891,14 @@ cron.schedule('0 8 * * *', async () => {
         ${topProducts
           .map(
             (p) =>
-              `<li>${p.name}: ${p.totalQuantity} sold, TZS ${p.totalRevenue.toLocaleString()}</li>`
+              <li>${p.name}: ${p.totalQuantity} sold, TZS ${p.totalRevenue.toLocaleString()}</li>
           )
           .join('')}
       </ul>
-    `;
+    ;
 
     await transporter.sendMail({
-      from: `"eStore Reports" <${process.env.EMAIL_USER}>`,
+      from: "eStore Reports" <${process.env.EMAIL_USER}>,
       to: process.env.ADMIN_EMAIL,
       subject: '📈 Daily Sales Analytics',
       html: htmlReport,
@@ -1978,11 +1910,13 @@ cron.schedule('0 8 * * *', async () => {
   }
 });
 
-// ────────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────
 // ERROR HANDLING & SERVER START
-// ────────────────────────────────────────────────────────────────────────────────
-
-app.use(errorHandler);
-
+// ────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Something went wrong!' });
+});
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
