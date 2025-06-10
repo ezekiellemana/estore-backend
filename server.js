@@ -518,8 +518,7 @@ app.post('/api/users/forgot-password', async (req, res) => {
     const user = await User.findOne({ email: email.toLowerCase().trim() });
     if (!user) {
       return res.status(200).json({
-        message:
-          'If that account exists, you will receive a password reset link shortly.',
+        message: 'If that account exists, you will receive a password reset link shortly.',
       });
     }
 
@@ -528,10 +527,10 @@ app.post('/api/users/forgot-password', async (req, res) => {
 
     const resetURL = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
     const mailOptions = {
-      from: "eStore Support" <${process.env.ADMIN_EMAIL}>,
+      from: `"eStore Support" <${process.env.ADMIN_EMAIL}>`,
       to: user.email,
       subject: '🔒 Your eStore Password Reset Link (expires in 10 minutes)',
-      text: Hi ${user.name},
+      text: `Hi ${user.name},
 
 You requested a password reset. Click the link below to set a new password. This link will expire in 10 minutes:
 
@@ -541,29 +540,27 @@ If you did not request this, please ignore this email.
 
 Thanks,
 eStore Team
-,
-      html: 
+`,
+      html: `
         <p>Hi ${user.name},</p>
         <p>You requested a password reset. Click the link below to set a new password (valid for 10 minutes):</p>
         <p><a href="${resetURL}">${resetURL}</a></p>
         <p>If you did not request this, please ignore this email.</p>
         <p>Thanks,<br>eStore Team</p>
-      ,
+      `,
     };
 
     await transporter.sendMail(mailOptions);
 
     res.status(200).json({
-      message:
-        'If that account exists, you will receive a password reset link shortly.',
+      message: 'If that account exists, you will receive a password reset link shortly.',
     });
   } catch (err) {
     console.error('Error in POST /api/users/forgot-password:', err);
-    res
-      .status(500)
-      .json({ error: 'Server error while sending reset link. Please try again.' });
+    res.status(500).json({ error: 'Server error while sending reset link. Please try again.' });
   }
 });
+
 
 // RESET PASSWORD
 app.post('/api/users/reset-password/:token', async (req, res) => {
