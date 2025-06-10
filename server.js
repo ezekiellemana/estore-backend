@@ -34,11 +34,23 @@ app.set('trust proxy', 1);
 // PASSPORT & SESSION SETUP
 // ────────────────────────────────────────────────────────────────────────────────
 
+
 app.use(
   session({
     secret: process.env.SESSION_SECRET || 'secretkey',
     resave: false,
     saveUninitialized: false,
+    store: MongoStore.create({
+      mongoUrl: process.env.MONGO_URI,
+      collectionName: 'sessions',
+      ttl: 60 * 60 * 24 * 7, // 1 week
+    }),
+    cookie: {
+      secure: process.env.NODE_ENV === 'production', // true if HTTPS
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: 1000 * 60 * 60 * 24 * 7, // 1 week
+    },
   })
 );
 app.use(passport.initialize());
@@ -352,45 +364,6 @@ const errorHandler = (err, req, res, next) => {
 };
 
 // ────────────────────────────────────────────────────────────────────────────────
-// AUTH MIDDLEWARES
-// ────────────────────────────────────────────────────────────────────────────────
-
-const authMiddleware = async (req, res, next) => {
-  const token = req.header('Authorization')?.replace('Bearer ', '');
-  if (!token) {
-    return res.status(401).json({ error: 'No token provided' });
-  }
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = await User.findById(decoded.userId);
-    if (!req.user) {
-      return res.status(401).json({ error: 'User not found' });
-    }
-    next();
-  } catch (error) {
-    res.status(401).json({ error: 'Invalid token' });
-  }
-};
-
-const adminMiddleware = async (req, res, next) => {
-  if (!req.user.isAdmin) {
-    return res.status(403).json({ error: 'Admin access required' });
-  }
-  next();
-};
-
-const optionalAuth = async (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (token) {
-    try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = await User.findById(decoded.userId);
-    } catch {}
-  }
-  next();
-};
-
-// ────────────────────────────────────────────────────────────────────────────────
 // NODEMAILER TRANSPORTER (SINGLE INSTANCE)
 // ────────────────────────────────────────────────────────────────────────────────
 
@@ -442,9 +415,25 @@ mongoose
   .catch((err) => console.error('MongoDB connection error:', err));
 
 // ────────────────────────────────────────────────────────────────────────────────
-// ROUTES: USERS (REGISTER, LOGIN, PROFILE, FORGOT/RESET PASSWORD, ADMIN)
+// ROUTES: USERS (REGISTER, LOGIN, LOGOUT, PROFILE, FORGOT/RESET PASSWORD, ADMIN)
 // ────────────────────────────────────────────────────────────────────────────────
 
+// AUTH MIDDLEWARE — session based
+const authMiddleware = async (req, res, next) => {
+  if (!req.session || !req.session.userId) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  req.user = await User.findById(req.session.userId);
+  if (!req.user) return res.status(401).json({ error: 'User not found' });
+  next();
+};
+
+const adminMiddleware = (req, res, next) => {
+  if (!req.user?.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+  next();
+};
+
+// REGISTER
 app.post(
   '/api/users/register',
   [
@@ -463,13 +452,16 @@ app.post(
 
       const user = new User({ name, email, password });
       await user.save();
-      res.status(201).json({ message: 'User registered' });
+      // Optionally auto-login after register:
+      req.session.userId = user._id;
+      res.status(201).json({ message: 'User registered', user: { ...user.toObject(), password: undefined } });
     } catch (err) {
       next(err);
     }
   }
 );
 
+// LOGIN (creates session)
 app.post(
   '/api/users/login',
   [
@@ -488,16 +480,23 @@ app.post(
       const match = await bcrypt.compare(password, user.password);
       if (!match) return res.status(400).json({ error: 'Invalid credentials' });
 
-      const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
-        expiresIn: '1h',
-      });
-      res.json({ token });
+      req.session.userId = user._id; // Save to session
+      res.json({ message: 'Login successful' });
     } catch (err) {
       next(err);
     }
   }
 );
 
+// LOGOUT (destroy session)
+app.post('/api/users/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.clearCookie('connect.sid');
+    res.json({ message: 'Logged out' });
+  });
+});
+
+// GET PROFILE
 app.get('/api/users/profile', authMiddleware, async (req, res, next) => {
   try {
     const user = await User.findById(req.user._id).select('-password');
@@ -507,6 +506,7 @@ app.get('/api/users/profile', authMiddleware, async (req, res, next) => {
   }
 });
 
+// UPDATE PROFILE
 app.put(
   '/api/users/profile',
   authMiddleware,
@@ -543,6 +543,7 @@ app.put(
   }
 );
 
+// UPDATE PASSWORD
 app.put(
   '/api/users/password',
   authMiddleware,
@@ -571,7 +572,7 @@ app.put(
   }
 );
 
-// ── GET ALL USERS (ADMIN ONLY) ─────────────────────────────────────────────────
+// GET ALL USERS (ADMIN ONLY)
 app.get('/api/users', authMiddleware, adminMiddleware, async (req, res, next) => {
   try {
     const users = await User.find({}).sort({ createdAt: -1 }).select('-password');
@@ -581,7 +582,7 @@ app.get('/api/users', authMiddleware, adminMiddleware, async (req, res, next) =>
   }
 });
 
-// ── FORGOT PASSWORD ROUTE ─────────────────────────────────────────────────══════
+// FORGOT PASSWORD
 app.post('/api/users/forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) {
@@ -589,21 +590,17 @@ app.post('/api/users/forgot-password', async (req, res) => {
   }
 
   try {
-    // 1) Find user by email
     const user = await User.findOne({ email: email.toLowerCase().trim() });
     if (!user) {
-      // Always respond with 200 to avoid email enumeration
       return res.status(200).json({
         message:
           'If that account exists, you will receive a password reset link shortly.',
       });
     }
 
-    // 2) Generate a reset token & store its hash + expiry in DB
     const resetToken = user.createPasswordResetToken();
     await user.save({ validateBeforeSave: false });
 
-    // 3) Send the plain resetToken via email
     const resetURL = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
     const mailOptions = {
       from: `"eStore Support" <${process.env.ADMIN_EMAIL}>`,
@@ -643,7 +640,7 @@ eStore Team
   }
 });
 
-// ── RESET PASSWORD ROUTE ─────────────────────────────────────────────────═══════
+// RESET PASSWORD
 app.post('/api/users/reset-password/:token', async (req, res) => {
   const { token } = req.params;
   const { password } = req.body;
@@ -654,10 +651,8 @@ app.post('/api/users/reset-password/:token', async (req, res) => {
   }
 
   try {
-    // 1) Hash the incoming token
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
-    // 2) Find user with matching reset token and not expired
     const user = await User.findOne({
       passwordResetToken: hashedToken,
       passwordResetExpires: { $gt: Date.now() },
@@ -667,7 +662,6 @@ app.post('/api/users/reset-password/:token', async (req, res) => {
       return res.status(400).json({ error: 'Token is invalid or has expired.' });
     }
 
-    // 3) Update password & clear reset fields
     user.password = password;
     user.passwordResetToken = undefined;
     user.passwordResetExpires = undefined;
