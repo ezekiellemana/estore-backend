@@ -34,7 +34,6 @@ app.set('trust proxy', 1);
 // PASSPORT & SESSION SETUP
 // ────────────────────────────────────────────────────────────────────────────────
 
-
 app.use(
   session({
     secret: process.env.SESSION_SECRET || 'secretkey',
@@ -43,13 +42,13 @@ app.use(
     store: MongoStore.create({
       mongoUrl: process.env.MONGO_URI,
       collectionName: 'sessions',
-      ttl: 60 * 60 * 24 * 7, // 1 day
+      ttl: 60 * 60 * 24 * 7, // 1 week
     }),
     cookie: {
-      secure: process.env.NODE_ENV === 'production', // true if HTTPS
+      secure: process.env.NODE_ENV === 'production',
       httpOnly: true,
       sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      maxAge: 1000 * 60 * 60 * 24 , // 1 week
+      maxAge: 1000 * 60 * 60 * 24 * 7, // 1 week
     },
   })
 );
@@ -331,8 +330,17 @@ const sanitizeInput = (req, res, next) => {
   next();
 };
 
+const allowedOrigins = [
+  'http://localhost:5173',
+  process.env.FRONTEND_URL
+];
+
 const corsOptions = {
-  origin: process.env.FRONTEND_URL,
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
 };
 
