@@ -12,6 +12,7 @@ const MongoStore = require('connect-mongo');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const GitHubStrategy = require('passport-github2').Strategy;
+import { OAuth2Client } from 'google-auth-library';
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const { body, query, validationResult } = require('express-validator');
@@ -412,7 +413,34 @@ app.post(
     }
   }
 );
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+app.post('/api/users/google-login', async (req, res) => {
+  const { token } = req.body;
+  try {
+    // 1. Verify with Google
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    const { sub: googleId, email, name, picture } = payload;
+
+    // 2. Find or create your user in DB
+    let user = await User.findOne({ googleId });
+    if (!user) {
+      user = await User.create({ googleId, email, name, avatar: picture });
+    }
+
+    // 3. Generate your JWT/session exactly like your regular login
+    const jwtToken = user.getSignedJwtToken();
+    res.cookie('token', jwtToken, { httpOnly: true, secure: true });
+    res.json(user);
+  } catch (err) {
+    console.error(err);
+    res.status(400).json({ error: 'Invalid Google token' });
+  }
+});
 // LOGOUT (destroy session)
 app.post('/api/users/logout', (req, res) => {
   req.session.destroy(() => {
