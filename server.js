@@ -12,7 +12,7 @@ const MongoStore = require('connect-mongo');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const GitHubStrategy = require('passport-github2').Strategy;
-import { OAuth2Client } from 'google-auth-library';
+const { OAuth2Client } = require('google-auth-library');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const { body, query, validationResult } = require('express-validator');
