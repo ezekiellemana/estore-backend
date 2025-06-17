@@ -387,7 +387,9 @@ app.post(
   }
 );
 
-// LOGIN (creates session)
+// ────────────────────────────────────────────────────────────────
+// LOGIN (creates session & returns user)
+// ────────────────────────────────────────────────────────────────
 app.post(
   '/api/users/login',
   [
@@ -396,51 +398,82 @@ app.post(
   ],
   async (req, res, next) => {
     const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
 
     try {
       const { email, password } = req.body;
       const user = await User.findOne({ email }).select('+password');
-      if (!user) return res.status(400).json({ error: 'Invalid credentials' });
+      if (!user) {
+        return res.status(400).json({ error: 'Invalid credentials' });
+      }
 
       const match = await bcrypt.compare(password, user.password);
-      if (!match) return res.status(400).json({ error: 'Invalid credentials' });
+      if (!match) {
+        return res.status(400).json({ error: 'Invalid credentials' });
+      }
 
-      req.session.userId = user._id; // Save to session
-      res.json({ message: 'Login successful' });
+      // ① Establish session
+      req.session.userId = user._id;
+
+      // ② Force a save so that the Set-Cookie header actually appears
+      req.session.save(async (err) => {
+        if (err) return next(err);
+
+        // ③ Load the user without password
+        const safeUser = await User.findById(user._id).select('-password');
+
+        // ④ Return the user object in this same response
+        res.json({ user: safeUser });
+      });
     } catch (err) {
       next(err);
     }
   }
 );
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-app.post('/api/users/google-login', async (req, res) => {
+// ────────────────────────────────────────────────────────────────
+// GOOGLE LOGIN (creates session & returns user)
+// ────────────────────────────────────────────────────────────────
+app.post('/api/users/google-login', async (req, res, next) => {
   const { token } = req.body;
   try {
-    // 1. Verify with Google
+    // 1. Verify Google token
     const ticket = await client.verifyIdToken({
       idToken: token,
       audience: process.env.GOOGLE_CLIENT_ID,
     });
-    const payload = ticket.getPayload();
-    const { sub: googleId, email, name, picture } = payload;
+    const { sub: googleId, email, name, picture } = ticket.getPayload();
 
-    // 2. Find or create your user in DB
-    let user = await User.findOne({ googleId });
+    // 2. Find or create
+    let user = await User.findOne({ oauthProvider: 'google', oauthId: googleId });
     if (!user) {
-      user = await User.create({ googleId, email, name, avatar: picture });
+      user = await User.create({
+        oauthProvider: 'google',
+        oauthId: googleId,
+        name,
+        email,
+        avatar: picture,
+        password: await bcrypt.hash(randomUUID(), 12), // random fallback
+      });
     }
 
-    // 3. Generate your JWT/session exactly like your regular login
-    const jwtToken = user.getSignedJwtToken();
-    res.cookie('token', jwtToken, { httpOnly: true, secure: true });
-    res.json(user);
+    // 3. Establish session
+    req.session.userId = user._id;
+
+    // 4. Force‐save and return user
+    req.session.save(async (err) => {
+      if (err) return next(err);
+      const safeUser = await User.findById(user._id).select('-password');
+      res.json({ user: safeUser });
+    });
   } catch (err) {
     console.error(err);
     res.status(400).json({ error: 'Invalid Google token' });
   }
 });
+
 // LOGOUT (destroy session)
 app.post('/api/users/logout', (req, res) => {
   req.session.destroy(() => {
