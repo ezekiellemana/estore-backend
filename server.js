@@ -210,70 +210,6 @@ const orderSchema = new mongoose.Schema({
 });
 const Order = mongoose.model('Order', orderSchema);
 
-// ────────────────────────────────
-// PASSPORT STRATEGIES
-// ────────────────────────────────
-passport.serializeUser((user, done) => done(null, user._id));
-passport.deserializeUser(async (id, done) => {
-  try {
-    const user = await User.findById(id);
-    done(null, user);
-  } catch (err) {
-    done(err);
-  }
-});
-passport.use(
-  new GoogleStrategy(
-    {
-      clientID: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: process.env.OAUTH_CALLBACK,
-    },
-    async (accessToken, refreshToken, profile, done) => {
-      try {
-        let user = await User.findOne({ oauthProvider: 'google', oauthId: profile.id });
-        if (!user) {
-          user = await User.create({
-            oauthProvider: 'google',
-            oauthId: profile.id,
-            name: profile.displayName,
-            email: profile.emails[0].value,
-            password: await bcrypt.hash(randomUUID(), 10),
-          });
-        }
-        done(null, user);
-      } catch (err) {
-        done(err);
-      }
-    }
-  )
-);
-passport.use(
-  new GitHubStrategy(
-    {
-      clientID: process.env.GITHUB_CLIENT_ID,
-      clientSecret: process.env.GITHUB_CLIENT_SECRET,
-      callbackURL: process.env.OAUTH_CALLBACK,
-    },
-    async (accessToken, refreshToken, profile, done) => {
-      try {
-        let user = await User.findOne({ oauthProvider: 'github', oauthId: profile.id });
-        if (!user) {
-          user = await User.create({
-            oauthProvider: 'github',
-            oauthId: profile.id,
-            name: profile.username,
-            email: profile.emails[0].value,
-            password: await bcrypt.hash(randomUUID(), 10),
-          });
-        }
-        done(null, user);
-      } catch (err) {
-        done(err);
-      }
-    }
-  )
-);
 
 // ────────────────────────────────
 // NODEMAILER TRANSPORTER
@@ -287,18 +223,6 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASS,
   },
 });
-
-// ────────────────────────────────
-// PASSPORT CALLBACK ROUTES
-// ────────────────────────────────
-app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
-app.get(
-  '/auth/google/callback',
-  passport.authenticate('google', { failureRedirect: '/login' }),
-  (req, res) => {
-    res.redirect(`${process.env.FRONTEND_URL}/oauth-success`);
-  }
-);
 
 // ────────────────────────────────
 // DB CONNECT
