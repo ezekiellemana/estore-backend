@@ -9,9 +9,6 @@ const dotenv = require('dotenv');
 const cors = require('cors');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
-const passport = require('passport');
-const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const GitHubStrategy = require('passport-github2').Strategy;
 const { OAuth2Client } = require('google-auth-library');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
@@ -25,33 +22,30 @@ const { Parser } = require('json2csv');
 const { randomUUID } = require('crypto');
 
 dotenv.config();
-
 const app = express();
 app.set('trust proxy', 1); // for deployment
 
 // ────────────────────────────────
-// CORS (Dev + Prod Support!)
+// CORS
 // ────────────────────────────────
 const allowedOrigins = [
   'http://localhost:5173',
   process.env.FRONTEND_URL
 ];
-const corsOptions = {
+app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
-};
-app.use(cors(corsOptions));
+}));
 
 // ────────────────────────────────
-// SESSION, COOKIES, BODY PARSE
+// BODY PARSE & COOKIES & SESSION
 // ────────────────────────────────
 app.use(express.json());
 app.use(cookieParser());
-
 app.use(
   session({
     secret: process.env.SESSION_SECRET || 'secretkey',
@@ -72,13 +66,7 @@ app.use(
 );
 
 // ────────────────────────────────
-// PASSPORT INIT
-// ────────────────────────────────
-app.use(passport.initialize());
-app.use(passport.session());
-
-// ────────────────────────────────
-// GUEST ID COOKIE + SANITIZE
+// GUEST ID COOKIE + INPUT SANITIZE
 // ────────────────────────────────
 app.use((req, res, next) => {
   if (req.headers.authorization?.startsWith('Bearer ')) return next();
@@ -87,16 +75,15 @@ app.use((req, res, next) => {
   next();
 });
 const sanitizeInput = (req, res, next) => {
-  const cleanObject = (obj) => {
-    for (const key in obj) {
+  const clean = (obj) => {
+    Object.keys(obj).forEach(key => {
       if (typeof obj[key] === 'string') obj[key] = obj[key].replace(/[$][\w]+/g, '');
-      else if (typeof obj[key] === 'object' && obj[key] !== null) cleanObject(obj[key]);
-    }
-    return obj;
+      else if (obj[key] && typeof obj[key] === 'object') clean(obj[key]);
+    });
   };
-  if (req.body) req.body = cleanObject(req.body);
-  if (req.query) req.query = cleanObject(req.query);
-  if (req.params) req.params = cleanObject(req.params);
+  if (req.body) clean(req.body);
+  if (req.query) clean(req.query);
+  if (req.params) clean(req.params);
   next();
 };
 app.use(sanitizeInput);
@@ -107,16 +94,11 @@ app.use(sanitizeInput);
 
 // USER
 const userSchema = new mongoose.Schema({
-  name: { type: String, required: [true, 'Name is required'], trim: true },
-  email: { type: String, required: [true, 'Email is required'], unique: true, lowercase: true, trim: true },
-  password: { type: String, required: [true, 'Password is required'], select: false },
+  name: { type: String, required: true, trim: true },
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  password: { type: String, required: true, select: false },
   isAdmin: { type: Boolean, default: false },
-  address: {
-    street: { type: String, default: '' },
-    city: { type: String, default: '' },
-    country: { type: String, default: '' },
-    postalCode: { type: String, default: '' },
-  },
+  address: { street: String, city: String, country: String, postalCode: String },
   wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product' }],
   passwordResetToken: String,
   passwordResetExpires: Date,
@@ -124,15 +106,15 @@ const userSchema = new mongoose.Schema({
   oauthId: String,
   createdAt: { type: Date, default: Date.now },
 });
-userSchema.pre('save', async function (next) {
+userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
   this.password = await bcrypt.hash(this.password, 12);
   next();
 });
-userSchema.methods.createPasswordResetToken = function () {
+userSchema.methods.createPasswordResetToken = function() {
   const resetToken = crypto.randomBytes(32).toString('hex');
   this.passwordResetToken = crypto.createHash('sha256').update(resetToken).digest('hex');
-  this.passwordResetExpires = Date.now() + 10 * 60 * 1000;
+  this.passwordResetExpires = Date.now() + 10*60*1000;
   return resetToken;
 };
 const User = mongoose.model('User', userSchema);
@@ -321,175 +303,124 @@ app.get(
 // ────────────────────────────────
 // DB CONNECT
 // ────────────────────────────────
-mongoose
-  .connect(process.env.MONGO_URI)
+mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('MongoDB connected'))
-  .catch((err) => console.error('MongoDB connection error:', err));
+  .catch(err => console.error('DB connect error:', err));
 
 // ────────────────────────────────
-// HELPER FUNCTIONS & MIDDLEWARES
+// AUTH MIDDLEWARES
 // ────────────────────────────────
 const authMiddleware = async (req, res, next) => {
-  if (!req.session || !req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
+  if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
   req.user = await User.findById(req.session.userId);
   if (!req.user) return res.status(401).json({ error: 'User not found' });
   next();
 };
 const adminMiddleware = (req, res, next) => {
-  if (!req.user?.isAdmin) return res.status(403).json({ error: 'Admin access required' });
+  if (!req.user.isAdmin) return res.status(403).json({ error: 'Admin required' });
   next();
 };
-// Optional auth for reviews etc
 const optionalAuth = async (req, res, next) => {
-  if (req.session && req.session.userId) {
-    req.user = await User.findById(req.session.userId);
-  }
+  if (req.session?.userId) req.user = await User.findById(req.session.userId);
   next();
 };
-const getCartQuery = (req) => req.user && req.user._id ? { user: req.user._id } : { guestId: req.cookies.guestId };
+const getCartQuery = req => req.user ? { user: req.user._id } : { guestId: req.cookies.guestId };
 
 // ────────────────────────────────
 // RATE LIMITERS
 // ────────────────────────────────
-const authLimiter = rateLimit({ windowMs: 60 * 1000, max: 50, message: 'Too many requests, slow down.' });
+const authLimiter = rateLimit({ windowMs:60*1000, max:50 });
 app.use('/api/users/login', authLimiter);
 app.use('/api/users/forgot-password', authLimiter);
 
-// ────────────────────────────────────────────────────────────────────────────────
-// ROUTES: USERS (REGISTER, LOGIN, LOGOUT, PROFILE, FORGOT/RESET PASSWORD, ADMIN)
-// ────────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────
+// GOOGLE CLIENT
+// ────────────────────────────────
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+// ────────────────────────────────
+// ROUTES: USERS
+// ────────────────────────────────
 
 // REGISTER
-app.post(
-  '/api/users/register',
-  [
-    body('name').notEmpty().withMessage('Name is required'),
-    body('email').isEmail().withMessage('Valid email is required'),
-    body('password').isLength({ min: 6 }).withMessage('Password must be 6+ chars'),
-  ],
-  async (req, res, next) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
+app.post('/api/users/register',
+  [ body('name').notEmpty(), body('email').isEmail(), body('password').isLength({min:6}) ],
+  async (req,res,next) => {
+    const errs=validationResult(req);
+    if(!errs.isEmpty()) return res.status(400).json({ errors: errs.array() });
     try {
-      const { name, email, password } = req.body;
-      const existing = await User.findOne({ email });
-      if (existing) return res.status(400).json({ error: 'Email already in use' });
-
-      const user = new User({ name, email, password });
+      const {name,email,password}=req.body;
+      if(await User.findOne({email})) return res.status(400).json({ error:'Email in use' });
+      const user=new User({name,email,password});
       await user.save();
-      // Optionally auto-login after register:
+      // auto-login
       req.session.userId = user._id;
-      res.status(201).json({ message: 'User registered', user: { ...user.toObject(), password: undefined } });
-    } catch (err) {
-      next(err);
-    }
+      req.session.save(err => {
+        if(err) return next(err);
+        const safe= {...user.toObject(), password:undefined};
+        res.status(201).json({ user: safe });
+      });
+    } catch(e){next(e);}
   }
 );
 
-// ────────────────────────────────────────────────────────────────
-// LOGIN (creates session & returns user)
-// ────────────────────────────────────────────────────────────────
-app.post(
-  '/api/users/login',
-  [
-    body('email').isEmail().withMessage('Valid email is required'),
-    body('password').notEmpty().withMessage('Password is required'),
-  ],
-  async (req, res, next) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-
+// LOGIN
+app.post('/api/users/login',
+  [ body('email').isEmail(), body('password').notEmpty() ],
+  async (req,res,next) => {
+    const errs=validationResult(req);
+    if(!errs.isEmpty()) return res.status(400).json({ errors: errs.array() });
     try {
-      const { email, password } = req.body;
-      const user = await User.findOne({ email }).select('+password');
-      if (!user) {
-        return res.status(400).json({ error: 'Invalid credentials' });
-      }
-
-      const match = await bcrypt.compare(password, user.password);
-      if (!match) {
-        return res.status(400).json({ error: 'Invalid credentials' });
-      }
-
-      // ① Establish session
-      req.session.userId = user._id;
-
-      // ② Force a save so that the Set-Cookie header actually appears
-      req.session.save(async (err) => {
-        if (err) return next(err);
-
-        // ③ Load the user without password
+      const { email,password }=req.body;
+      const user=await User.findOne({email}).select('+password');
+      if(!user) return res.status(400).json({ error:'Invalid creds' });
+      if(!(await bcrypt.compare(password,user.password))) return res.status(400).json({ error:'Invalid creds' });
+      req.session.userId=user._id;
+      req.session.save(async err => {
+        if(err) return next(err);
         const safeUser = await User.findById(user._id).select('-password');
-
-        // ④ Return the user object in this same response
         res.json({ user: safeUser });
       });
-    } catch (err) {
-      next(err);
-    }
+    } catch(e){next(e);}  
   }
 );
 
-// ────────────────────────────────────────────────────────────────
-// GOOGLE LOGIN (creates session & returns user)
-// ────────────────────────────────────────────────────────────────
-app.post('/api/users/google-login', async (req, res, next) => {
-  const { token } = req.body;
+// GOOGLE LOGIN
+app.post('/api/users/google-login', async (req,res,next) => {
   try {
-    // 1. Verify Google token
-    const ticket = await client.verifyIdToken({
-      idToken: token,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
-    const { sub: googleId, email, name, picture } = ticket.getPayload();
-
-    // 2. Find or create
-    let user = await User.findOne({ oauthProvider: 'google', oauthId: googleId });
-    if (!user) {
-      user = await User.create({
-        oauthProvider: 'google',
-        oauthId: googleId,
-        name,
-        email,
-        avatar: picture,
-        password: await bcrypt.hash(randomUUID(), 12), // random fallback
-      });
+    const { token } = req.body;
+    const ticket = await googleClient.verifyIdToken({ idToken: token, audience: process.env.GOOGLE_CLIENT_ID });
+    const { sub, email, name, picture } = ticket.getPayload();
+    let user = await User.findOne({ oauthProvider:'google', oauthId: sub });
+    if(!user) {
+      user=await User.create({ oauthProvider:'google', oauthId: sub, name, email, avatar:picture, password:await bcrypt.hash(randomUUID(),12) });
     }
-
-    // 3. Establish session
     req.session.userId = user._id;
-
-    // 4. Force‐save and return user
-    req.session.save(async (err) => {
-      if (err) return next(err);
+    req.session.save(async err => {
+      if(err) return next(err);
       const safeUser = await User.findById(user._id).select('-password');
       res.json({ user: safeUser });
     });
-  } catch (err) {
-    console.error(err);
-    res.status(400).json({ error: 'Invalid Google token' });
+  } catch(e) {
+    console.error(e);
+    res.status(400).json({ error:'Invalid Google token' });
   }
 });
 
-// LOGOUT (destroy session)
-app.post('/api/users/logout', (req, res) => {
+// LOGOUT
+app.post('/api/users/logout', (req,res) => {
   req.session.destroy(() => {
     res.clearCookie('connect.sid');
-    res.json({ message: 'Logged out' });
+    res.json({ message:'Logged out' });
   });
 });
 
-// GET PROFILE
-app.get('/api/users/profile', authMiddleware, async (req, res, next) => {
+// PROFILE
+app.get('/api/users/profile', authMiddleware, async (req,res,next)=>{
   try {
     const user = await User.findById(req.user._id).select('-password');
     res.json(user);
-  } catch (err) {
-    next(err);
-  }
+  } catch(e) { next(e); }
 });
 
 // UPDATE PROFILE
